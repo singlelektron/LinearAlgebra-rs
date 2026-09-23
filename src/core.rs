@@ -773,6 +773,66 @@ impl Scalar {
     }
 }
 
+// Keep a determinant's pivot product in binary scientific notation. Applying
+// the exponent only at the end avoids intermediate overflow/underflow even
+// when the final determinant is representable. Pivot selection is unchanged.
+struct FloatDeterminantProduct {
+    mantissa: f64,
+    exponent: i32,
+}
+impl FloatDeterminantProduct {
+    fn new() -> Self {
+        Self {
+            mantissa: 1.0,
+            exponent: 0,
+        }
+    }
+
+    fn multiply(&mut self, mut value: f64) {
+        debug_assert!(value.is_finite() && value != 0.0);
+        let mut adjustment = 0;
+        if value.is_subnormal() {
+            // Scaling a subnormal by 2^52 is exact and makes it normal, so its
+            // leading bit can be recovered using the same decomposition.
+            value *= (1u64 << 52) as f64;
+            adjustment = -52;
+        }
+        let bits = value.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023 + adjustment;
+        let fraction_and_sign = bits & ((1u64 << 63) | ((1u64 << 52) - 1));
+        let mantissa = f64::from_bits(fraction_and_sign | (1023u64 << 52));
+        self.mantissa *= mantissa;
+        self.exponent += exponent;
+        if self.mantissa.abs() >= 2.0 {
+            self.mantissa *= 0.5;
+            self.exponent += 1;
+        }
+    }
+
+    fn finish(self) -> CalcResult<f64> {
+        if self.exponent > 1023 {
+            return Err(CalcError("Floating-point determinant overflow".into()));
+        }
+        let result = if self.exponent >= -1022 {
+            self.mantissa * f64::from_bits(((self.exponent + 1023) as u64) << 52)
+        } else if self.exponent >= -1074 {
+            self.mantissa * f64::from_bits(1u64 << (self.exponent + 1074))
+        } else if self.exponent == -1075 {
+            // 2^-1075 itself is not representable. Halving the normalized
+            // mantissa first still permits correct rounding to 2^-1074.
+            (self.mantissa * 0.5) * f64::from_bits(1)
+        } else {
+            0.0
+        };
+        if result == 0.0 {
+            return Err(CalcError(
+                "Floating-point determinant underflow: nonzero result rounds to zero".into(),
+            ));
+        }
+        Ok(result)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Matrix {
     data: Vec<Vec<Scalar>>,
@@ -999,6 +1059,7 @@ impl Matrix {
         let mut data = self.data.clone();
         let threshold = pivot_threshold(&data, n, context);
         let mut result = Scalar::integer(1, context.mode);
+        let mut float_product = FloatDeterminantProduct::new();
         for col in 0..n {
             let Some(pivot) = choose_pivot(&data, col, col, threshold, context.mode) else {
                 context.steps.push(format!(
@@ -1017,7 +1078,11 @@ impl Matrix {
                 ));
             }
             let pivot_value = data[col][col].clone();
-            result = result.mul(&pivot_value, context)?;
+            if let Scalar::Float(value) = &pivot_value {
+                float_product.multiply(*value);
+            } else {
+                result = result.mul(&pivot_value, context)?;
+            }
             for row in col + 1..n {
                 if data[row][col].is_zero() {
                     continue;
@@ -1041,7 +1106,11 @@ impl Matrix {
         context
             .steps
             .push("Determinant = row-swap sign × product of diagonal pivots".into());
-        Ok(result)
+        if let Scalar::Float(sign) = result {
+            Ok(Scalar::Float(sign * float_product.finish()?))
+        } else {
+            Ok(result)
+        }
     }
     fn symbolic_det(&self, context: &mut Context) -> CalcResult<Scalar> {
         let n = self.rows();
@@ -1519,6 +1588,76 @@ mod tests {
             Scalar::parse("1e-100", Mode::Float).unwrap().format(6),
             "1e-100"
         );
+    }
+
+    #[test]
+    fn float_determinants_preserve_representable_products_at_extreme_scales() {
+        for (small, small_count, large, large_count, expected) in
+            [(1e-10, 33, 10.0, 31, 1e-299), (0.1, 32, 1e10, 32, 1e288)]
+        {
+            let mut diagonal = vec![small; small_count];
+            diagonal.extend(vec![large; large_count]);
+            for _ in 0..2 {
+                let mut a = Matrix::zeros(diagonal.len(), diagonal.len(), Mode::Float).unwrap();
+                for (index, &value) in diagonal.iter().enumerate() {
+                    a.data[index][index] = Scalar::Float(value);
+                }
+                let Scalar::Float(actual) = a.det(&mut ctx(Mode::Float)).unwrap() else {
+                    panic!("float expected");
+                };
+                assert!((actual / expected - 1.0).abs() < 1e-13, "{actual:e}");
+                diagonal.reverse();
+            }
+        }
+    }
+
+    #[test]
+    fn float_determinants_keep_signs_subnormals_and_report_range_errors() {
+        for (entries, expected) in [
+            ([0.0, 2.0, 3.0, 4.0], -6.0),
+            ([0.0, -2.0, 3.0, 4.0], 6.0),
+            ([-2.0, 0.0, 0.0, 3.0], -6.0),
+            (
+                [2f64.powi(-537), 0.0, 0.0, 2f64.powi(-537)],
+                f64::from_bits(1),
+            ),
+            (
+                [2f64.powi(-537), 0.0, 0.0, 2f64.powi(-538) * 1.5],
+                f64::from_bits(1),
+            ),
+        ] {
+            let a = Matrix::new(vec![
+                vec![Scalar::Float(entries[0]), Scalar::Float(entries[1])],
+                vec![Scalar::Float(entries[2]), Scalar::Float(entries[3])],
+            ])
+            .unwrap();
+            assert_eq!(
+                a.det(&mut ctx(Mode::Float)).unwrap(),
+                Scalar::Float(expected)
+            );
+        }
+        for value in [
+            f64::from_bits(1),
+            -f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            f64::MAX,
+        ] {
+            let a = Matrix::new(vec![vec![Scalar::Float(value)]]).unwrap();
+            assert_eq!(a.det(&mut ctx(Mode::Float)).unwrap(), Scalar::Float(value));
+        }
+        for (value, message) in [(1e200, "overflow"), (1e-200, "underflow")] {
+            let a = Matrix::new(vec![
+                vec![Scalar::Float(value), Scalar::Float(0.0)],
+                vec![Scalar::Float(0.0), Scalar::Float(value)],
+            ])
+            .unwrap();
+            assert!(
+                a.det(&mut ctx(Mode::Float))
+                    .unwrap_err()
+                    .0
+                    .contains(message)
+            );
+        }
     }
 
     #[test]

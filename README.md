@@ -107,6 +107,10 @@ proof of singularity. Ill-conditioned systems may require a different tolerance
 or exact arithmetic; results are not accompanied by a condition estimate.
 For systems with multiple right-hand sides, consistency is checked against each
 RHS column's own scale; a large column cannot hide an inconsistent smaller one.
+Floating-point determinant products retain a binary scale until the final
+conversion, avoiding intermediate overflow or underflow when the result is
+representable. A nonzero determinant that rounds to zero or exceeds the finite
+`f64` range returns an explicit error.
 
 Symbolic determinants use a division-free algorithm, so `det([x 1; 0 x]) = x^2`
 does not require `x` to be nonzero. Inverses and row reduction can require such
