@@ -80,6 +80,47 @@ fn latex_output_is_a_document_with_exact_fractions() {
 }
 
 #[test]
+fn latex_handles_unicode_identifiers_in_values_titles_and_conditions() {
+    let output = la()
+        .args([
+            "--latex",
+            "--mode",
+            "symbolic",
+            "--steps",
+            "-e",
+            "ο = ς + 1; W = [文 ο; 0 α]; inv(W); :vars; :help",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.is_ascii(),
+        "pdfLaTeX source contains raw Unicode: {stdout}"
+    );
+    assert!(stdout.contains("\\varsigma"), "{stdout}");
+    assert!(stdout.contains("\\mathrm{o}"), "{stdout}");
+    assert!(stdout.contains("[U+6587]"), "{stdout}");
+    assert!(stdout.contains("Assumptions:"), "{stdout}");
+}
+
+#[test]
+fn latex_keeps_multiletter_parameters_distinct_from_products() {
+    let output = la()
+        .args(["--latex", "--mode", "symbolic", "-e", "ab^2 + (a*b)^2"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\\mathrm{ab}^{2}"), "{stdout}");
+    assert!(stdout.contains("a^{2} b^{2}"), "{stdout}");
+}
+
+#[test]
 fn mode_and_help_flags_are_usable() {
     assert!(la().arg("--help").output().unwrap().status.success());
     let symbolic = la()

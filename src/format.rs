@@ -3,6 +3,7 @@
 use unicode_width::UnicodeWidthStr;
 
 use crate::core::{Mode, Scalar, Value};
+use crate::latex::text as latex_text;
 use crate::session::{Output, Session};
 
 pub fn render_value(value: &Value, precision: usize, ascii: bool) -> String {
@@ -141,91 +142,6 @@ pub fn render_output(output: &Output, _session: &Session, ascii: bool) -> String
     } else {
         rendered
     }
-}
-
-/// Escapes arbitrary user identifiers and session text for a LaTeX text node.
-fn latex_text(text: &str) -> String {
-    let mut escaped = String::new();
-    for character in text.chars() {
-        match character {
-            '\\' => escaped.push_str("\\textbackslash{}"),
-            '{' => escaped.push_str("\\{"),
-            '}' => escaped.push_str("\\}"),
-            '$' => escaped.push_str("\\$"),
-            '&' => escaped.push_str("\\&"),
-            '#' => escaped.push_str("\\#"),
-            '_' => escaped.push_str("\\_"),
-            '%' => escaped.push_str("\\%"),
-            '~' => escaped.push_str("\\textasciitilde{}"),
-            '^' => escaped.push_str("\\textasciicircum{}"),
-            'ℚ' => escaped.push('Q'),
-            'ℝ' => escaped.push('R'),
-            '×' => escaped.push_str(" x "),
-            '→' => escaped.push_str("\\ensuremath{\\rightarrow}"),
-            '←' => escaped.push_str("\\ensuremath{\\leftarrow}"),
-            '↔' => escaped.push_str("\\ensuremath{\\leftrightarrow}"),
-            '−' => escaped.push('-'),
-            '≠' => escaped.push_str("\\ensuremath{\\ne}"),
-            '≤' => escaped.push_str("\\ensuremath{\\le}"),
-            '≥' => escaped.push_str("\\ensuremath{\\ge}"),
-            '≈' => escaped.push_str("\\ensuremath{\\approx}"),
-            'ᵢ' => escaped.push_str("\\ensuremath{{}_i}"),
-            'ⱼ' => escaped.push_str("\\ensuremath{{}_j}"),
-            '₀'..='₉' => escaped.push_str(&format!(
-                "\\ensuremath{{{{}}_{}}}",
-                character as u32 - '₀' as u32
-            )),
-            character if greek_command(character).is_some() => {
-                escaped.push_str("\\ensuremath{\\");
-                escaped.push_str(greek_command(character).unwrap_or_default());
-                escaped.push('}');
-            }
-            character => escaped.push(character),
-        }
-    }
-    escaped
-}
-
-fn greek_command(character: char) -> Option<&'static str> {
-    Some(match character {
-        'α' => "alpha",
-        'β' => "beta",
-        'γ' => "gamma",
-        'δ' => "delta",
-        'ε' => "epsilon",
-        'ζ' => "zeta",
-        'η' => "eta",
-        'θ' => "theta",
-        'ι' => "iota",
-        'κ' => "kappa",
-        'λ' => "lambda",
-        'μ' => "mu",
-        'ν' => "nu",
-        'ξ' => "xi",
-        'ο' => "mathrm{o}",
-        'π' => "pi",
-        'ρ' => "rho",
-        'σ' => "sigma",
-        'ς' => "varsigma",
-        'τ' => "tau",
-        'υ' => "upsilon",
-        'φ' => "phi",
-        'χ' => "chi",
-        'ψ' => "psi",
-        'ω' => "omega",
-        'Γ' => "Gamma",
-        'Δ' => "Delta",
-        'Θ' => "Theta",
-        'Λ' => "Lambda",
-        'Ξ' => "Xi",
-        'Π' => "Pi",
-        'Σ' => "Sigma",
-        'Υ' => "Upsilon",
-        'Φ' => "Phi",
-        'Ψ' => "Psi",
-        'Ω' => "Omega",
-        _ => return None,
-    })
 }
 
 fn scalar_latex(scalar: &Scalar, precision: usize) -> String {

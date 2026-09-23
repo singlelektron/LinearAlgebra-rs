@@ -13,6 +13,8 @@ use num_bigint::BigInt;
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 
+use crate::latex::symbol as latex_symbol;
+
 pub const MAX_DIMENSION: usize = 64;
 pub const MAX_CELLS: usize = 4096;
 const MAX_BITS: u64 = 16_384;
@@ -504,54 +506,6 @@ impl RationalFunction {
             format!("({numerator})/({})", self.denominator.format(false))
         }
     }
-}
-
-fn latex_symbol(name: &str) -> String {
-    let mut result = String::new();
-    for character in name.chars() {
-        result.push_str(match character {
-            'α' => "\\alpha ",
-            'β' => "\\beta ",
-            'γ' => "\\gamma ",
-            'δ' => "\\delta ",
-            'ε' => "\\varepsilon ",
-            'ζ' => "\\zeta ",
-            'η' => "\\eta ",
-            'θ' => "\\theta ",
-            'ι' => "\\iota ",
-            'κ' => "\\kappa ",
-            'λ' => "\\lambda ",
-            'μ' => "\\mu ",
-            'ν' => "\\nu ",
-            'ξ' => "\\xi ",
-            'π' => "\\pi ",
-            'ρ' => "\\rho ",
-            'σ' => "\\sigma ",
-            'τ' => "\\tau ",
-            'υ' => "\\upsilon ",
-            'φ' => "\\phi ",
-            'χ' => "\\chi ",
-            'ψ' => "\\psi ",
-            'ω' => "\\omega ",
-            'Γ' => "\\Gamma ",
-            'Δ' => "\\Delta ",
-            'Θ' => "\\Theta ",
-            'Λ' => "\\Lambda ",
-            'Ξ' => "\\Xi ",
-            'Π' => "\\Pi ",
-            'Σ' => "\\Sigma ",
-            'Υ' => "\\Upsilon ",
-            'Φ' => "\\Phi ",
-            'Ψ' => "\\Psi ",
-            'Ω' => "\\Omega ",
-            '_' => "\\_",
-            _ => {
-                result.push(character);
-                continue;
-            }
-        });
-    }
-    result.trim_end().to_owned()
 }
 
 fn rational_format(value: &Rational, latex: bool) -> String {

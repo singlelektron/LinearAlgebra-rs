@@ -146,6 +146,10 @@ la --ascii --steps -e 'rref([1 2 3; 2 4 7])'
 ```
 
 LaTeX output is source code; compiling it requires a separate TeX installation.
+Single Latin and standard Greek parameters use mathematical glyphs; multi-letter
+parameters use upright, grouped names so `ab^2` is distinct from `(a*b)^2`.
+Other Unicode identifier characters are preserved as explicit `[U+XXXX]` labels
+in portable pdfLaTeX output, including in assumptions and explanatory text.
 Session variables live in memory. Keep a `.la` script to reproduce a calculation.
 
 ## Session commands
