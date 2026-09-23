@@ -1157,11 +1157,24 @@ impl Matrix {
             .map(|(a, b)| a.iter().chain(b).cloned().collect())
             .collect();
         let (data, pivots) = eliminate(combined, self.cols(), context)?;
-        let rhs_threshold = pivot_threshold(&rhs.data, rhs.cols(), context);
+        // Each right-hand side defines an independent system. Its numerical
+        // consistency must not depend on the scale of another RHS column.
+        let rhs_thresholds: Vec<f64> = (0..rhs.cols())
+            .map(|col| {
+                rhs.data
+                    .iter()
+                    .filter_map(|row| match row[col] {
+                        Scalar::Float(value) => Some(value.abs()),
+                        _ => None,
+                    })
+                    .fold(0.0f64, f64::max)
+                    * context.tolerance
+            })
+            .collect();
         for row in data.iter().skip(pivots.len()) {
-            for value in row.iter().skip(self.cols()) {
+            for (value, threshold) in row.iter().skip(self.cols()).zip(&rhs_thresholds) {
                 let nonzero = match value {
-                    Scalar::Float(v) => v.abs() > rhs_threshold,
+                    Scalar::Float(v) => v.abs() > *threshold,
                     _ => !value.is_zero(),
                 };
                 if nonzero {
@@ -1467,6 +1480,58 @@ mod tests {
         let b = exact(&[&["2"], &["3"], &["5"]]);
         assert_eq!(a.solve(&b, &mut c).unwrap(), exact(&[&["2"], &["3"]]));
         assert!(a.solve(&exact(&[&["2"], &["3"], &["6"]]), &mut c).is_err());
+    }
+
+    #[test]
+    fn float_solve_checks_each_rhs_column_at_its_own_scale() {
+        let a = matrix(&[&["1"], &["1"]], Mode::Float);
+        for b in [
+            matrix(&[&["1", "1e20"], &["2", "1e20"]], Mode::Float),
+            matrix(&[&["1e20", "1"], &["1e20", "2"]], Mode::Float),
+            matrix(&[&["1e-20", "1e20"], &["2e-20", "1e20"]], Mode::Float),
+            matrix(&[&["0", "1e-20"], &["0", "2e-20"]], Mode::Float),
+        ] {
+            let error = a.solve(&b, &mut ctx(Mode::Float)).unwrap_err();
+            assert!(error.0.contains("Inconsistent"));
+        }
+    }
+
+    #[test]
+    fn float_solve_accepts_consistent_rhs_columns_with_different_scales() {
+        let a = matrix(&[&["1"], &["1"]], Mode::Float);
+        let b = matrix(
+            &[&["1e-20", "1e20", "0"], &["1e-20", "1e20", "0"]],
+            Mode::Float,
+        );
+        assert_eq!(
+            a.solve(&b, &mut ctx(Mode::Float)).unwrap(),
+            matrix(&[&["1e-20", "1e20", "0"]], Mode::Float)
+        );
+
+        let nearly_consistent = matrix(
+            &[&["1", "1e20"], &["1.0000000000005", "1.0000000000005e20"]],
+            Mode::Float,
+        );
+        assert!(a.solve(&nearly_consistent, &mut ctx(Mode::Float)).is_ok());
+    }
+
+    #[test]
+    fn float_solve_preserves_single_rhs_tolerance_and_zero_rhs() {
+        let a = matrix(&[&["1"], &["1"]], Mode::Float);
+        let nearby = matrix(&[&["1"], &["1.0000000000005"]], Mode::Float);
+        assert!(a.solve(&nearby, &mut ctx(Mode::Float)).is_ok());
+        let inconsistent = matrix(&[&["1"], &["1.000000000005"]], Mode::Float);
+        assert!(
+            a.solve(&inconsistent, &mut ctx(Mode::Float))
+                .unwrap_err()
+                .0
+                .contains("Inconsistent")
+        );
+        let zero = matrix(&[&["0"], &["0"]], Mode::Float);
+        assert_eq!(
+            a.solve(&zero, &mut ctx(Mode::Float)).unwrap(),
+            matrix(&[&["0"]], Mode::Float)
+        );
     }
 
     #[test]

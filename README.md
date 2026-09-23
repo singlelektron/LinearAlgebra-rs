@@ -105,6 +105,8 @@ based on the largest absolute entry of the coefficient matrix. The default
 tolerance is `1e-12`. It is a numerical rank decision, not an error bound or a
 proof of singularity. Ill-conditioned systems may require a different tolerance
 or exact arithmetic; results are not accompanied by a condition estimate.
+For systems with multiple right-hand sides, consistency is checked against each
+RHS column's own scale; a large column cannot hide an inconsistent smaller one.
 
 Symbolic determinants use a division-free algorithm, so `det([x 1; 0 x]) = x^2`
 does not require `x` to be nonzero. Inverses and row reduction can require such
