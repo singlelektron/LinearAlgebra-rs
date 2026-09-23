@@ -833,6 +833,114 @@ impl FloatDeterminantProduct {
     }
 }
 
+// Float solves retain an independent binary scale for every RHS entry. A single
+// scale for an entire column would lose small entries in a column containing
+// both very large and very small values. Mantissas still use ordinary f64
+// precision; the extended exponent prevents intermediate RHS range failures.
+#[derive(Clone, Copy)]
+struct ScaledRhs {
+    mantissa: f64,
+    exponent: i32,
+}
+impl ScaledRhs {
+    fn new(mut value: f64) -> Self {
+        debug_assert!(value.is_finite());
+        if value == 0.0 {
+            return Self {
+                mantissa: 0.0,
+                exponent: 0,
+            };
+        }
+        let mut adjustment = 0;
+        if value.is_subnormal() {
+            value *= (1u64 << 52) as f64;
+            adjustment = -52;
+        }
+        let bits = value.to_bits();
+        Self {
+            mantissa: f64::from_bits(
+                (bits & ((1u64 << 63) | ((1u64 << 52) - 1))) | (1023u64 << 52),
+            ),
+            exponent: ((bits >> 52) & 0x7ff) as i32 - 1023 + adjustment,
+        }
+    }
+
+    fn multiply(self, factor: f64) -> Self {
+        let factor = Self::new(factor);
+        let mut result = Self::new(self.mantissa * factor.mantissa);
+        result.exponent += self.exponent + factor.exponent;
+        result
+    }
+
+    fn divide(self, divisor: f64) -> Self {
+        debug_assert!(divisor != 0.0);
+        let divisor = Self::new(divisor);
+        let mut result = Self::new(self.mantissa / divisor.mantissa);
+        result.exponent += self.exponent - divisor.exponent;
+        result
+    }
+
+    fn subtract(self, other: Self) -> Self {
+        if other.mantissa == 0.0 {
+            return self;
+        }
+        if self.mantissa == 0.0 {
+            return Self {
+                mantissa: -other.mantissa,
+                ..other
+            };
+        }
+        let exponent = self.exponent.max(other.exponent);
+        let align = |value: Self| {
+            let shift = value.exponent - exponent;
+            if shift < -1074 {
+                0.0
+            } else if shift < -1022 {
+                value.mantissa * f64::from_bits(1u64 << (shift + 1074))
+            } else {
+                value.mantissa * f64::from_bits(((shift + 1023) as u64) << 52)
+            }
+        };
+        let mut result = Self::new(align(self) - align(other));
+        result.exponent += exponent;
+        result
+    }
+
+    fn exceeds(self, threshold: f64) -> bool {
+        if self.mantissa == 0.0 {
+            return false;
+        }
+        let threshold = Self::new(threshold);
+        threshold.mantissa == 0.0
+            || self.exponent > threshold.exponent
+            || (self.exponent == threshold.exponent && self.mantissa.abs() > threshold.mantissa)
+    }
+
+    fn finish(self) -> CalcResult<Scalar> {
+        if self.mantissa == 0.0 {
+            return Ok(Scalar::Float(0.0));
+        }
+        if self.exponent > 1023 {
+            return Err(CalcError("Floating-point solution overflow".into()));
+        }
+        let result = if self.exponent >= -1022 {
+            self.mantissa * f64::from_bits(((self.exponent + 1023) as u64) << 52)
+        } else if self.exponent >= -1074 {
+            self.mantissa * f64::from_bits(1u64 << (self.exponent + 1074))
+        } else if self.exponent == -1075 {
+            (self.mantissa * 0.5) * f64::from_bits(1)
+        } else {
+            0.0
+        };
+        if result == 0.0 {
+            return Err(CalcError(
+                "Floating-point solution underflow: nonzero result rounds to zero".into(),
+            ));
+        }
+        Scalar::finite(result)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Matrix {
     data: Vec<Vec<Scalar>>,
@@ -1147,12 +1255,13 @@ impl Matrix {
     }
     pub fn rref(&self, context: &mut Context) -> CalcResult<Self> {
         self.check(context)?;
-        let (data, _) = eliminate(self.data.clone(), self.cols(), context)?;
-        Self::new(data)
+        Self::new(eliminate(self.data.clone(), self.cols(), context)?.data)
     }
     pub fn rank(&self, context: &mut Context) -> CalcResult<usize> {
         self.check(context)?;
-        Ok(eliminate(self.data.clone(), self.cols(), context)?.1.len())
+        Ok(eliminate(self.data.clone(), self.cols(), context)?
+            .pivots
+            .len())
     }
     pub fn inverse(&self, context: &mut Context) -> CalcResult<Self> {
         self.square()?;
@@ -1179,7 +1288,11 @@ impl Matrix {
             .zip(&rhs.data)
             .map(|(a, b)| a.iter().chain(b).cloned().collect())
             .collect();
-        let (data, pivots) = eliminate(combined, self.cols(), context)?;
+        let Elimination {
+            data,
+            pivots,
+            float_rhs,
+        } = eliminate(combined, self.cols(), context)?;
         // Each right-hand side defines an independent system. Its numerical
         // consistency must not depend on the scale of another RHS column.
         let rhs_thresholds: Vec<f64> = (0..rhs.cols())
@@ -1194,13 +1307,24 @@ impl Matrix {
                     * context.tolerance
             })
             .collect();
-        for row in data.iter().skip(pivots.len()) {
-            for (value, threshold) in row.iter().skip(self.cols()).zip(&rhs_thresholds) {
-                let nonzero = match value {
-                    Scalar::Float(v) => v.abs() > *threshold,
-                    _ => !value.is_zero(),
-                };
-                if nonzero {
+        if let Some(float_rhs) = &float_rhs {
+            // Compare residuals before converting back to f64. A large
+            // residual means inconsistency, not an unrepresentable solution.
+            if float_rhs.iter().skip(pivots.len()).any(|row| {
+                row.iter()
+                    .zip(&rhs_thresholds)
+                    .any(|(&value, &threshold)| value.exceeds(threshold))
+            }) {
+                return Err(CalcError(
+                    "Inconsistent system: no solution on the evaluated branch".into(),
+                ));
+            }
+        } else {
+            for row in data.iter().skip(pivots.len()) {
+                for value in row.iter().skip(self.cols()) {
+                    if value.is_zero() {
+                        continue;
+                    }
                     if matches!(value, Scalar::Symbolic(v) if v.as_constant().is_none()) {
                         return Err(CalcError(format!(
                             "System consistency requires {} = 0; parameter case splitting is not supported",
@@ -1222,7 +1346,14 @@ impl Matrix {
         }
         let mut result = Self::zeros(self.cols(), rhs.cols(), context.mode)?;
         for (row, &pivot) in pivots.iter().enumerate() {
-            result.data[pivot] = data[row][self.cols()..].to_vec();
+            result.data[pivot] = if let Some(float_rhs) = &float_rhs {
+                float_rhs[row]
+                    .iter()
+                    .map(|value| value.finish())
+                    .collect::<CalcResult<Vec<_>>>()?
+            } else {
+                data[row][self.cols()..].to_vec()
+            };
         }
         let all_conditions = context.conditions.clone();
         for value in result.data.iter_mut().flatten() {
@@ -1291,7 +1422,11 @@ fn choose_pivot(
     }
 }
 
-type Elimination = (Vec<Vec<Scalar>>, Vec<usize>);
+struct Elimination {
+    data: Vec<Vec<Scalar>>,
+    pivots: Vec<usize>,
+    float_rhs: Option<Vec<Vec<ScaledRhs>>>,
+}
 fn eliminate(
     mut data: Vec<Vec<Scalar>>,
     coefficient_columns: usize,
@@ -1299,6 +1434,25 @@ fn eliminate(
 ) -> CalcResult<Elimination> {
     let rows = data.len();
     let threshold = pivot_threshold(&data, coefficient_columns, context);
+    let mut float_rhs = if context.mode == Mode::Float && data[0].len() > coefficient_columns {
+        context.steps.push(
+            "Right-hand sides retain binary scales during elimination; final solution entries are converted to f64".into(),
+        );
+        Some(
+            data.iter_mut()
+                .map(|row| {
+                    row.drain(coefficient_columns..)
+                        .map(|value| match value {
+                            Scalar::Float(value) => ScaledRhs::new(value),
+                            _ => unreachable!("validated float matrix"),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
     if context.mode == Mode::Float {
         context.steps.push(format!(
             "Partial pivoting; numerical-zero threshold = tolerance × max|Aᵢⱼ| = {threshold:.6e}"
@@ -1328,6 +1482,9 @@ fn eliminate(
         };
         if pivot != next_row {
             data.swap(pivot, next_row);
+            if let Some(rhs) = &mut float_rhs {
+                rhs.swap(pivot, next_row);
+            }
             context
                 .steps
                 .push(format!("R{} ↔ R{}", next_row + 1, pivot + 1));
@@ -1335,6 +1492,11 @@ fn eliminate(
         let divisor = data[next_row][col].clone();
         for value in &mut data[next_row] {
             *value = value.div(&divisor, context)?;
+        }
+        if let (Some(rhs), Scalar::Float(divisor)) = (&mut float_rhs, &divisor) {
+            for value in &mut rhs[next_row] {
+                *value = value.divide(*divisor);
+            }
         }
         context.steps.push(format!(
             "R{} ← R{} / ({})",
@@ -1351,6 +1513,12 @@ fn eliminate(
             let factor = row[col].clone();
             for (value, pivot_value) in row.iter_mut().zip(&pivot_values) {
                 *value = value.sub(&factor.mul(pivot_value, context)?, context)?;
+            }
+            if let (Some(rhs), Scalar::Float(factor)) = (&mut float_rhs, &factor) {
+                for index in 0..rhs[row_index].len() {
+                    rhs[row_index][index] =
+                        rhs[row_index][index].subtract(rhs[next_row][index].multiply(*factor));
+                }
             }
             row[col] = Scalar::integer(0, context.mode);
             context.steps.push(format!(
@@ -1370,7 +1538,11 @@ fn eliminate(
             value.conditions.extend(context.conditions.clone());
         }
     }
-    Ok((data, pivots))
+    Ok(Elimination {
+        data,
+        pivots,
+        float_rhs,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1554,6 +1726,103 @@ mod tests {
         assert_eq!(
             a.solve(&zero, &mut ctx(Mode::Float)).unwrap(),
             matrix(&[&["0"]], Mode::Float)
+        );
+    }
+
+    #[test]
+    fn float_solve_keeps_representable_solutions_through_rhs_range_growth() {
+        for a in [
+            matrix(&[&["1", "1"], &["-1", "1"]], Mode::Float),
+            matrix(&[&["-1", "1"], &["1", "1"]], Mode::Float),
+        ] {
+            let b = matrix(
+                &[
+                    &["1e308", "-1e308", "1e-308"],
+                    &["1e308", "-1e308", "1e-308"],
+                ],
+                Mode::Float,
+            );
+            assert_eq!(
+                a.solve(&b, &mut ctx(Mode::Float)).unwrap(),
+                matrix(
+                    &[&["0", "0", "0"], &["1e308", "-1e308", "1e-308"]],
+                    Mode::Float,
+                )
+            );
+        }
+
+        // Normalizing the first pivot produces 2^1024 on the RHS; after
+        // elimination both solution entries are the representable 2^1023.
+        let tiny = f64::MIN_POSITIVE;
+        let a = Matrix::new(vec![
+            vec![Scalar::Float(tiny), Scalar::Float(tiny)],
+            vec![Scalar::Float(tiny / 2.0), Scalar::Float(-tiny / 2.0)],
+        ])
+        .unwrap();
+        let b = matrix(&[&["4"], &["0"]], Mode::Float);
+        let expected = Scalar::Float(f64::from_bits(2046u64 << 52));
+        assert_eq!(
+            a.solve(&b, &mut ctx(Mode::Float)).unwrap(),
+            Matrix::new(vec![vec![expected.clone()], vec![expected]]).unwrap()
+        );
+
+        // A global RHS scale would erase the smallest entry in this column.
+        let b = Matrix::new(vec![
+            vec![Scalar::Float(f64::MAX)],
+            vec![Scalar::Float(f64::from_bits(1))],
+        ])
+        .unwrap();
+        assert_eq!(
+            Matrix::identity(2, Mode::Float)
+                .unwrap()
+                .solve(&b, &mut ctx(Mode::Float))
+                .unwrap(),
+            b
+        );
+    }
+
+    #[test]
+    fn float_solve_scaled_rhs_keeps_consistency_and_solution_range_errors_distinct() {
+        let a = matrix(&[&["1"], &["1"]], Mode::Float);
+        for b in [
+            matrix(&[&["1e308", "1e-308"], &["-1e308", "1e-308"]], Mode::Float),
+            matrix(&[&["1e308", "1e-308"], &["1e308", "2e-308"]], Mode::Float),
+        ] {
+            assert!(
+                a.solve(&b, &mut ctx(Mode::Float))
+                    .unwrap_err()
+                    .0
+                    .contains("Inconsistent")
+            );
+        }
+        let near = matrix(&[&["1e308"], &["1.0000000000005e308"]], Mode::Float);
+        assert!(a.solve(&near, &mut ctx(Mode::Float)).is_ok());
+        let outside = matrix(&[&["1e308"], &["1.000000000005e308"]], Mode::Float);
+        assert!(
+            a.solve(&outside, &mut ctx(Mode::Float))
+                .unwrap_err()
+                .0
+                .contains("Inconsistent")
+        );
+        for (coefficient, rhs, message) in [
+            ("1e-308", "2", "solution overflow"),
+            ("1e308", "1e-308", "solution underflow"),
+        ] {
+            assert!(
+                matrix(&[&[coefficient]], Mode::Float)
+                    .solve(&matrix(&[&[rhs]], Mode::Float), &mut ctx(Mode::Float))
+                    .unwrap_err()
+                    .0
+                    .contains(message)
+            );
+        }
+        let underdetermined = matrix(&[&["1e-308", "1e-308"]], Mode::Float);
+        assert!(
+            underdetermined
+                .solve(&matrix(&[&["2"]], Mode::Float), &mut ctx(Mode::Float))
+                .unwrap_err()
+                .0
+                .contains("No unique solution")
         );
     }
 

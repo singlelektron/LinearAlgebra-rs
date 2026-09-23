@@ -107,6 +107,13 @@ proof of singularity. Ill-conditioned systems may require a different tolerance
 or exact arithmetic; results are not accompanied by a condition estimate.
 For systems with multiple right-hand sides, consistency is checked against each
 RHS column's own scale; a large column cannot hide an inconsistent smaller one.
+Floating-point `solve` and `inv` retain a separate binary scale for each RHS
+entry during elimination, so intermediate RHS overflow or underflow does not
+discard a representable solution. Mantissas retain `f64` precision; coefficient
+arithmetic and pivot decisions still use ordinary `f64`. A final nonzero
+solution entry that rounds to zero or exceeds the finite range returns an
+explicit error. This does not remove coefficient overflow or conditioning
+limits.
 Floating-point determinant products retain a binary scale until the final
 conversion, avoiding intermediate overflow or underflow when the result is
 representable. A nonzero determinant that rounds to zero or exceeds the finite
