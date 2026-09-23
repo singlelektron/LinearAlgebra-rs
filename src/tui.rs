@@ -16,7 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::core::Value;
 use crate::format::{render_output, render_value};
@@ -437,7 +437,7 @@ fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
         .title(title)
 }
 
-fn variable_lines(workspace: &Workspace) -> Vec<Line<'static>> {
+fn variable_lines(workspace: &Workspace, width: usize) -> Vec<Line<'static>> {
     if workspace.session.variables().is_empty() {
         return vec![
             Line::styled("No variables yet", Style::default().fg(MUTED)),
@@ -447,11 +447,23 @@ fn variable_lines(workspace: &Workspace) -> Vec<Line<'static>> {
     }
     let mut lines = Vec::new();
     for (name, value) in workspace.session.variables() {
+        let conditions = workspace
+            .session
+            .variable_conditions(name)
+            .filter(|conditions| !conditions.is_empty());
         let shape = match value {
             Value::Scalar(_) => "scalar".into(),
             Value::Matrix(matrix) => format!("{} × {}", matrix.rows(), matrix.cols()),
         };
         lines.push(Line::from(vec![
+            Span::styled(
+                if conditions.is_some() {
+                    "conditional "
+                } else {
+                    ""
+                },
+                Style::default().fg(MUTED),
+            ),
             Span::styled(
                 name.clone(),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -480,6 +492,18 @@ fn variable_lines(workspace: &Workspace) -> Vec<Line<'static>> {
             lines.push(Line::styled(
                 "... enter the name for the full value",
                 Style::default().fg(MUTED),
+            ));
+        }
+        if let Some(conditions) = conditions {
+            lines.extend(wrapped_lines(
+                vec![Line::styled(
+                    format!(
+                        "Assumptions: {}",
+                        conditions.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                    Style::default().fg(MUTED),
+                )],
+                width,
             ));
         }
         lines.push(Line::from(""));
@@ -575,7 +599,11 @@ fn draw(frame: &mut Frame<'_>, workspace: &mut Workspace) {
     );
     if wide {
         frame.render_widget(
-            Paragraph::new(variable_lines(workspace)).block(panel(" Variables · Tab ")),
+            Paragraph::new(variable_lines(
+                workspace,
+                columns[1].width.saturating_sub(2) as usize,
+            ))
+            .block(panel(" Variables · Tab ")),
             columns[1],
         );
     }
@@ -598,7 +626,7 @@ fn draw(frame: &mut Frame<'_>, workspace: &mut Workspace) {
         draw_help(frame, area, workspace);
     } else if workspace.variables {
         let popup = inset(area, 3, 2);
-        let lines = variable_lines(workspace);
+        let lines = variable_lines(workspace, popup.width.saturating_sub(2) as usize);
         workspace.variable_max_scroll = lines
             .len()
             .saturating_sub(popup.height.saturating_sub(2) as usize);
@@ -656,7 +684,8 @@ fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
     )
 }
 
-fn wrapped_help_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+fn wrapped_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
     let mut wrapped = Vec::new();
     for line in lines {
         let text = line
@@ -672,7 +701,14 @@ fn wrapped_help_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'stat
             if !current.is_empty() {
                 current.push(' ');
             }
-            current.push_str(word);
+            // Parameter names can be wider than the variable popup. Split
+            // long words as well, so vertical scrolling exposes every part.
+            for character in word.chars() {
+                if !current.is_empty() && current.width() + character.width().unwrap_or(0) > width {
+                    wrapped.push(Line::styled(std::mem::take(&mut current), line.style));
+                }
+                current.push(character);
+            }
         }
         wrapped.push(Line::styled(current, line.style));
     }
@@ -706,7 +742,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, workspace: &mut Workspace) {
             Style::default().fg(ACCENT),
         ),
     ];
-    let lines = wrapped_help_lines(lines, popup.width.saturating_sub(2) as usize);
+    let lines = wrapped_lines(lines, popup.width.saturating_sub(2) as usize);
     workspace.help_max_scroll = lines
         .len()
         .saturating_sub(popup.height.saturating_sub(2) as usize);
@@ -769,6 +805,91 @@ mod tests {
         assert_eq!(workspace.editor.text, "det(");
         assert!(workspace.session.variables().contains_key("A"));
         assert!(workspace.session.variables().contains_key("ans"));
+    }
+
+    fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn variable_views_keep_rank_assumptions_after_notebook_is_cleared() {
+        let mut workspace = Workspace::new(Session::new(Mode::Symbolic), false);
+        workspace.editor.insert("r = rank([[x]])");
+        workspace.submit();
+        workspace.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert!(workspace.transcript.is_empty());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut workspace)).unwrap();
+        let sidebar = screen_text(&terminal);
+        assert!(sidebar.contains("r   scalar"));
+        assert!(sidebar.contains("ans   scalar"));
+        assert_eq!(sidebar.matches("Assumptions: x != 0").count(), 2);
+
+        // A short sidebar may have no room for the condition detail, but its
+        // visible value must still be identified as conditional.
+        let mut short = Terminal::new(TestBackend::new(100, 10)).unwrap();
+        short.draw(|frame| draw(frame, &mut workspace)).unwrap();
+        assert!(screen_text(&short).contains("conditional ans"));
+
+        workspace.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(65, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut workspace)).unwrap();
+        let popup = screen_text(&terminal);
+        assert!(popup.contains("r   scalar"));
+        assert!(popup.contains("ans   scalar"));
+        assert_eq!(popup.matches("Assumptions: x != 0").count(), 2);
+    }
+
+    #[test]
+    fn variable_browser_preserves_cancelled_and_inherited_conditions() {
+        let mut workspace = Workspace::new(Session::new(Mode::Symbolic), false);
+        workspace.editor.insert("a=x/x; b=a; M=inv([[y]]); z=1");
+        workspace.submit();
+        let lines = variable_lines(&workspace, 80)
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(lines.contains("a   scalar\n1\nAssumptions: x != 0"));
+        assert!(lines.contains("b   scalar\n1\nAssumptions: x != 0"));
+        assert!(lines.contains("M   1 × 1\n[ (1)/(y) ]\nAssumptions: y != 0"));
+        assert!(lines.ends_with("z   scalar\n1\n"));
+        assert_eq!(lines.matches("Assumptions:").count(), 3);
+    }
+
+    #[test]
+    fn narrow_variable_popup_exposes_every_line_of_long_conditions() {
+        let parameter = "x".repeat(64);
+        let mut workspace = Workspace::new(Session::new(Mode::Symbolic), false);
+        workspace
+            .editor
+            .insert(&format!("r = rank([[{parameter}]])"));
+        workspace.submit();
+        workspace.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        workspace.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        let mut terminal = Terminal::new(TestBackend::new(45, 16)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut workspace)).unwrap();
+        assert!(workspace.variable_max_scroll > 0);
+        let lines = variable_lines(&workspace, 37);
+        assert!(lines.iter().all(|line| line.width() <= 37));
+        let mut seen = screen_text(&terminal);
+        for _ in 0..workspace.variable_max_scroll {
+            workspace.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            terminal.draw(|frame| draw(frame, &mut workspace)).unwrap();
+            seen.push_str(&screen_text(&terminal));
+        }
+        for line in lines {
+            assert!(seen.contains(&line.to_string()), "missing line: {line}");
+        }
+        assert!(seen.contains("!= 0"));
     }
 
     #[test]

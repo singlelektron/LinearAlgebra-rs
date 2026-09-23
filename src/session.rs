@@ -75,6 +75,13 @@ impl Session {
         &self.variables
     }
 
+    /// Domain and branch assumptions needed to interpret a stored value.
+    /// These can include dependencies not represented in the value itself,
+    /// such as the nonzero pivot behind a symbolic rank result.
+    pub fn variable_conditions(&self, name: &str) -> Option<&BTreeSet<String>> {
+        self.variable_conditions.get(name)
+    }
+
     /// Evaluate a batch and return its final result. Use `execute_script` to
     /// retain every statement's output.
     pub fn execute(&mut self, input: &str) -> CalcResult<Output> {
@@ -224,7 +231,7 @@ impl Session {
                         }
                     };
                     lines.push(format!("{name} = {description}"));
-                    if let Some(conditions) = self.variable_conditions.get(name)
+                    if let Some(conditions) = self.variable_conditions(name)
                         && !conditions.is_empty()
                     {
                         lines.push(format!(
@@ -1115,6 +1122,30 @@ mod tests {
         assert!(session.execute("1").unwrap().conditions.is_empty());
         session.execute(":clear").unwrap();
         assert!(session.variables().is_empty());
+    }
+
+    #[test]
+    fn variable_metadata_preserves_and_clears_branch_conditions() {
+        let mut session = Session::new(Mode::Symbolic);
+        let expected = BTreeSet::from(["x != 0".to_owned()]);
+        assert!(session.variable_conditions("r").is_none());
+        let output = session.execute("r = rank([[x]])").unwrap();
+        // Rank is a constant value; its branch condition lives in session metadata.
+        assert!(output.value.unwrap().conditions().is_empty());
+        assert_eq!(session.variable_conditions("r"), Some(&expected));
+        assert_eq!(session.variable_conditions("ans"), Some(&expected));
+        session.execute("saved = r").unwrap();
+        assert_eq!(session.variable_conditions("saved"), Some(&expected));
+        assert!(session.execute("r = 1/0").is_err());
+        assert_eq!(session.variable_conditions("r"), Some(&expected));
+        session.execute("r = 2").unwrap();
+        assert!(session.variable_conditions("r").unwrap().is_empty());
+        assert!(session.variable_conditions("ans").unwrap().is_empty());
+        assert_eq!(session.variable_conditions("saved"), Some(&expected));
+        session.execute(":clear").unwrap();
+        assert!(session.variable_conditions("saved").is_none());
+        session.execute("r = rank([[x]])\n:mode exact").unwrap();
+        assert!(session.variable_conditions("r").is_none());
     }
 
     #[test]

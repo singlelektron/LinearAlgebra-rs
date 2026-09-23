@@ -28,6 +28,8 @@ and symbolic modes are explicit and never silently substitute for exact results.
 - `Value::{Scalar(Scalar), Matrix(Matrix)}` is the expression value type.
 - `Session::new(mode)`; public settings `mode`, `precision`, `tolerance`,
   `show_steps`; `variables()` returns `&BTreeMap<String, Value>`;
+  `variable_conditions(name)` exposes the stored assumptions for each value,
+  including conditions behind a constant symbolic rank result;
   `execute(&str)` returns `CalcResult<Output>`.
 - `Output` has public `title: String`, `value: Option<Value>`,
   `text: Option<String>`, `steps: Vec<String>`, `conditions: Vec<String>`,

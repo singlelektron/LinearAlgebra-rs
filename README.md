@@ -126,6 +126,10 @@ The TUI presents an expression editor, a scrollable calculation transcript, and
 a variable browser. Wide terminals show the variables alongside the work;
 smaller terminals prioritize the calculation. Matrix columns are aligned and
 rendered with mathematical brackets. Exact fractions remain fractions.
+Stored symbolic assumptions appear alongside variables marked `conditional` in
+both the sidebar and the Tab browser. Clearing the notebook with Ctrl+L keeps
+these assumptions visible with their values; long conditions wrap and can be
+scrolled in the browser.
 
 | Key | Action |
 | --- | --- |
