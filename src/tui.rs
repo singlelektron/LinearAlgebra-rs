@@ -583,7 +583,10 @@ fn draw(frame: &mut Frame<'_>, workspace: &mut Workspace) {
         workspace.scroll = workspace.scroll.min(maximum_scroll);
     }
     let title = if workspace.horizontal_scroll > 0 {
-        format!(" Notebook · column {} ", workspace.horizontal_scroll + 1)
+        format!(
+            " Notebook · column {} ",
+            usize::from(workspace.horizontal_scroll) + 1
+        )
     } else {
         " Notebook ".into()
     };
@@ -815,6 +818,33 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn horizontal_scroll_boundary_renders_without_overflow() {
+        let mut workspace = Workspace::new(Session::new(Mode::Exact), false);
+        workspace.transcript = vec![Line::from(format!(
+            "{}right edge",
+            " ".repeat(usize::from(u16::MAX))
+        ))];
+        for _ in 0..=u16::MAX / 8 {
+            workspace.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        }
+        assert_eq!(workspace.horizontal_scroll, u16::MAX);
+        workspace.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        assert_eq!(workspace.horizontal_scroll, u16::MAX);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut workspace)).unwrap();
+        let screen = screen_text(&terminal);
+        assert!(screen.contains("Notebook · column 65536"));
+        assert!(screen.contains("right edge"));
+
+        workspace.key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(workspace.horizontal_scroll, u16::MAX - 8);
+        workspace.horizontal_scroll = 0;
+        workspace.key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(workspace.horizontal_scroll, 0);
     }
 
     #[test]
