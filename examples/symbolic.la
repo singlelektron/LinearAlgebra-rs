@@ -1,0 +1,4 @@
+:mode symbolic
+S = [x 1; 0 x]
+det(S)
+S * inv(S)
