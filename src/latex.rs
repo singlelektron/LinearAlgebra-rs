@@ -69,7 +69,9 @@ fn codepoint(character: char) -> String {
 }
 
 /// One atomic identifier, so an exponent applies to its entire name. Roman
-/// multi-letter names also remain distinguishable from products of letters.
+/// multi-letter names remain distinguishable from products of Latin letters.
+/// Greek commands ignore `\mathrm`, so compound names containing Greek also
+/// need visible delimiters to distinguish them from products of parameters.
 pub(crate) fn symbol(name: &str) -> String {
     let mut characters = name.chars();
     if let Some(character) = characters.next()
@@ -83,18 +85,25 @@ pub(crate) fn symbol(name: &str) -> String {
         }
     }
     let mut result = String::new();
+    let mut contains_greek = false;
     for character in name.chars() {
         if character.is_ascii_alphanumeric() {
             result.push(character);
         } else if character == '_' {
             result.push_str(r"\_");
         } else if let Some(command) = greek(character) {
+            contains_greek = true;
             result.push_str(&format!("{{{command}}}"));
         } else {
             result.push_str(&format!("\\text{{{}}}", codepoint(character)));
         }
     }
-    format!("\\mathrm{{{result}}}")
+    let identifier = format!("\\mathrm{{{result}}}");
+    if contains_greek {
+        format!("\\mathord{{\\langle{identifier}\\rangle}}")
+    } else {
+        identifier
+    }
 }
 
 /// Escape text in titles, commands, assumptions, and elimination steps.
@@ -169,7 +178,26 @@ mod tests {
             assert!(!symbol(name).contains(r"\input"));
             assert!(!text(name).contains(r"\input"));
         }
-        assert_eq!(symbol("αx"), r"\mathrm{{\alpha}x}");
+        assert_eq!(symbol("αx"), r"\mathord{\langle\mathrm{{\alpha}x}\rangle}");
         assert_eq!(symbol("x_1"), r"\mathrm{x\_1}");
+    }
+
+    #[test]
+    fn compound_greek_identifiers_are_visibly_delimited_as_single_atoms() {
+        use crate::core::Mode;
+        use crate::session::Session;
+
+        for (name, product) in [("αβ", "α*β"), ("ΓΔ", "Γ*Δ"), ("αx", "α*x")] {
+            let mut session = Session::new(Mode::Symbolic);
+            let named = session.execute(&format!("{name}^2")).unwrap();
+            let multiplied = session.execute(&format!("({product})^2")).unwrap();
+            let named = crate::format::render_latex(&named, &session);
+            let multiplied = crate::format::render_latex(&multiplied, &session);
+            assert!(named.is_ascii(), "{named}");
+            assert!(named.contains(r"\mathord{\langle"), "{named}");
+            assert!(named.contains(r"\rangle}^{2}"), "{named}");
+            assert!(!multiplied.contains(r"\langle"), "{multiplied}");
+            assert!(!multiplied.contains(r"\rangle"), "{multiplied}");
+        }
     }
 }

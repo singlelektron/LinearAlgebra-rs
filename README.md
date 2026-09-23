@@ -162,7 +162,9 @@ la --ascii --steps -e 'rref([1 2 3; 2 4 7])'
 
 LaTeX output is source code; compiling it requires a separate TeX installation.
 Single Latin and standard Greek parameters use mathematical glyphs; multi-letter
-parameters use upright, grouped names so `ab^2` is distinct from `(a*b)^2`.
+Latin parameters use upright, grouped names so `ab^2` is distinct from `(a*b)^2`.
+Compound names containing Greek letters use angle delimiters, so the single
+identifier `αβ` appears as `⟨αβ⟩` and remains distinct from the product `α*β`.
 Other Unicode identifier characters are preserved as explicit `[U+XXXX]` labels
 in portable pdfLaTeX output, including in assumptions and explanatory text.
 Session variables live in memory. Keep a `.la` script to reproduce a calculation.
